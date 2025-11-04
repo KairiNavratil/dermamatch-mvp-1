@@ -100,7 +100,7 @@ model_analyzer = genai.GenerativeModel(
 )
 
 model_recommender = genai.GenerativeModel(
-    model_name="models/gemini-2.5-pro",
+    model_name="models/gemini-2.5-flash",
     system_instruction=RECOMMENDER_PROMPT,
     generation_config={"response_mime_type": "application/json"}
 )
@@ -115,7 +115,7 @@ def get_product_by_name(name):
         return result.iloc[0].to_dict()
     return None
 
-def get_product_sample(product_type, sample_size=20):
+def get_product_sample(product_type, sample_size=15):
     if product_db.empty:
         return []
     
@@ -158,11 +158,11 @@ def get_image_recommendation():
 
         print("Building product lists for Recommender AI...")
         product_lists_for_ai = {
-            "CLEANSER": get_product_sample("CLEANSER", 20),
-            "TONER": get_product_sample("TONER", 20),
-            "SERUM": get_product_sample("SERUM", 20),
-            "MOISTURIZER": get_product_sample("MOISTURIZER", 20),
-            "SUNSCREEN": get_product_sample("SUNSCREEN", 20)
+            "CLEANSER": get_product_sample("CLEANSER", 15),
+            "TONER": get_product_sample("TONER", 15),
+            "SERUM": get_product_sample("SERUM", 15),
+            "MOISTURIZER": get_product_sample("MOISTURIZER", 15),
+            "SUNSCREEN": get_product_sample("SUNSCREEN", 15)
         }
 
         recommender_prompt = f"""
