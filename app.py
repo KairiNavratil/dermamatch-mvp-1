@@ -98,7 +98,7 @@ def get_recommendation_for_type(skin_profile, product_type):
     if candidate_df.empty:
         return None 
     
-    sample_size = min(len(candidate_df), 75)
+    sample_size = min(len(candidate_df), 30)
     product_sample = candidate_df.sample(sample_size)
     
     products_json = product_sample[['name', 'ingredients_str']].to_dict(orient='records')
