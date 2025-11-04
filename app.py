@@ -53,28 +53,38 @@ EXAMPLE OUTPUT:
 
 RECOMMENDER_PROMPT = """
 You are a 'Derma-AI' product recommender. You are an expert cosmetic chemist.
-Your ONLY job is to find the single best product from a given list that matches a
-user's skin profile.
+Your ONLY job is to find the single best product from *each* category list
+that matches a user's skin profile.
 
 INPUTS:
 - **profile**: A JSON object of the user's skin profile.
-- **product_type**: The type of product to find (e.g., "CLEANSER").
-- **products**: A JSON list of candidate products of that type, including their
-  names and ingredient lists.
+- **product_lists**: A JSON object containing 5 arrays of products.
+  (e.g., "CLEANSER": [...], "TONER": [...], etc.)
 
 TASK:
 1.  Analyze the user's **profile**.
-2.  Examine the **ingredient list (`ingredients_str`)** of *every single product*
-    in the **products** list.
-3.  Find the product whose ingredients *best* target the user's specific **concerns**
-    while respecting their **sensitivity**.
-4.  Return ONLY a valid JSON object with the *exact name* of your chosen product
+2.  For **each** of the 5 product lists provided (CLEANSER, TONER, etc.):
+3.  Examine the **ingredient list (`ingredients_str`)** of every product in that list.
+4.  Find the **one** product from that specific list whose ingredients *best*
+    target the user's **concerns** while respecting their **sensitivity**.
+5.  Return ONLY a valid JSON object containing an array named "recommendations".
+    Each item in the array must have the *exact name* of your chosen product
     and a *specific reasoning*.
 
 EXAMPLE OUTPUT:
 {
-  "best_product_name": "CeraVe SA Cleanser",
-  "reasoning": "I chose this product because its Salicylic Acid directly targets the user's 'Comedonal Acne', while its fragrance-free formula is perfect for their 'high sensitivity'."
+  "recommendations": [
+    {
+      "type": "CLEANSER",
+      "best_product_name": "CeraVe SA Cleanser",
+      "reasoning": "Selected for its Salicylic Acid to target 'Comedonal Acne', while being fragrance-free for 'high sensitivity'."
+    },
+    {
+      "type": "TONER",
+      "best_product_name": "Anua Heartleaf 77% Soothing Toner",
+      "reasoning": "The Houttuynia Cordata is excellent for calming the redness and irritation seen in the profile."
+    }
+  ]
 }
 """
 
@@ -90,43 +100,29 @@ model_recommender = genai.GenerativeModel(
     generation_config={"response_mime_type": "application/json"}
 )
 
-def get_recommendation_for_type(skin_profile, product_type):
-    if product_db.empty:
+def get_product_by_name(name):
+    if product_db.empty or name is None:
         return None
+    
+    result = product_db[product_db['name'].str.lower() == name.lower()]
+    
+    if not result.empty:
+        return result.iloc[0].to_dict()
+    return None
+
+def get_product_sample(product_type, sample_size=20):
+    if product_db.empty:
+        return []
     
     candidate_df = product_db[product_db['type'] == product_type]
     if candidate_df.empty:
-        return None 
+        return []
     
-    sample_size = min(len(candidate_df), 30)
-    product_sample = candidate_df.sample(sample_size)
+    actual_sample_size = min(len(candidate_df), sample_size)
+    product_sample = candidate_df.sample(actual_sample_size)
     
-    products_json = product_sample[['name', 'ingredients_str']].to_dict(orient='records')
-    
-    prompt = f"""
-    "profile": {json.dumps(skin_profile)},
-    "product_type": "{product_type}",
-    "products": {json.dumps(products_json)}
-    """
-    
-    try:
-        response = model_recommender.generate_content(prompt)
-        recommendation = json.loads(response.text)
-        
-        best_name = recommendation.get("best_product_name")
-        if not best_name:
-            return None
-        
-        full_product_data = product_sample[product_sample['name'].str.lower() == best_name.lower()]
-        
-        if not full_product_data.empty:
-            return full_product_data.iloc[0].to_dict()
-        else:
-            return product_sample.sample(1).iloc[0].to_dict()
+    return product_sample[['name', 'ingredients_str']].to_dict(orient='records')
 
-    except Exception as e:
-        print(f"Error in recommender AI call: {e}")
-        return product_sample.sample(1).iloc[0].to_dict()
 
 @app.route('/recommend-image', methods=['POST'])
 def get_image_recommendation():
@@ -155,23 +151,40 @@ def get_image_recommendation():
         skin_profile = json.loads(response.text)
         print(f"Analyzer AI returned profile: {skin_profile}")
 
-        recommended_products = []
-        product_types_to_find = ['CLEANSER', 'TONER', 'SERUM', 'MOISTURIZER', 'SUNSCREEN']
-        
-        for p_type in product_types_to_find:
-            print(f"Calling Recommender AI for: {p_type}...")
-            product = get_recommendation_for_type(skin_profile, p_type)
+        print("Building product lists for Recommender AI...")
+        product_lists_for_ai = {
+            "CLEANSER": get_product_sample("CLEANSER", 20),
+            "TONER": get_product_sample("TONER", 20),
+            "SERUM": get_product_sample("SERUM", 20),
+            "MOISTURIZER": get_product_sample("MOISTURIZER", 20),
+            "SUNSCREEN": get_product_sample("SUNSCREEN", 20)
+        }
+
+        recommender_prompt = f"""
+        "profile": {json.dumps(skin_profile)},
+        "product_lists": {json.dumps(product_lists_for_ai)}
+        """
+
+        print("Calling Recommender AI (Mega-Call)...")
+        response = model_recommender.generate_content(recommender_prompt)
+        recommendations = json.loads(response.text).get("recommendations", [])
+        print(f"Recommender AI returned {len(recommendations)} products.")
+
+        final_product_list = []
+        for rec in recommendations:
+            product_name = rec.get("best_product_name")
+            product_data = get_product_by_name(product_name)
             
-            if product:
-                recommended_products.append({
-                    "imageUrl": product.get('imageUrl'),
-                    "type": product.get('type'),
-                    "price": product.get('price'),
-                    "name": product.get('name'),
-                    "store": product.get('store')
+            if product_data:
+                final_product_list.append({
+                    "imageUrl": product_data.get('imageUrl'),
+                    "type": product_data.get('type'),
+                    "price": product_data.get('price'),
+                    "name": product_data.get('name'),
+                    "store": product_data.get('store')
                 })
 
-        return jsonify(recommended_products), 200
+        return jsonify(final_product_list), 200
 
     except json.JSONDecodeError:
         print(f"Error: Invalid JSON string provided in 'data' field.")
