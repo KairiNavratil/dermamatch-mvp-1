@@ -67,9 +67,10 @@ TASK:
 3.  Examine the **ingredient list (`ingredients_str`)** of every product in that list.
 4.  Find the **one** product from that specific list whose ingredients *best*
     target the user's **concerns** while respecting their **sensitivity**.
-5.  Return ONLY a valid JSON object containing an array named "recommendations".
-    Each item in the array must have the *exact name* of your chosen product
-    and a *specific reasoning*.
+5.  Based on the product's name and brand, provide a *realistic estimated price*
+    (as a number, e.g., 24.99) and a *common store* (e.g., "Sephora", "Target").
+6.  Return ONLY a valid JSON object containing an array named "recommendations".
+    Each item in the array must have all 5 of these keys.
 
 EXAMPLE OUTPUT:
 {
@@ -77,12 +78,16 @@ EXAMPLE OUTPUT:
     {
       "type": "CLEANSER",
       "best_product_name": "CeraVe SA Cleanser",
-      "reasoning": "Selected for its Salicylic Acid to target 'Comedonal Acne', while being fragrance-free for 'high sensitivity'."
+      "reasoning": "Selected for its Salicylic Acid to target 'Comedonal Acne', while being fragrance-free for 'high sensitivity'.",
+      "price": 14.99,
+      "store": "Target"
     },
     {
       "type": "TONER",
       "best_product_name": "Anua Heartleaf 77% Soothing Toner",
-      "reasoning": "The Houttuynia Cordata is excellent for calming the redness and irritation seen in the profile."
+      "reasoning": "The Houttuynia Cordata is excellent for calming the redness and irritation seen in the profile.",
+      "price": 22.50,
+      "store": "Amazon"
     }
   ]
 }
@@ -175,14 +180,17 @@ def get_image_recommendation():
             product_name = rec.get("best_product_name")
             product_data = get_product_by_name(product_name)
             
-            if product_data:
-                final_product_list.append({
-                    "imageUrl": product_data.get('imageUrl'),
-                    "type": product_data.get('type'),
-                    "price": product_data.get('price'),
-                    "name": product_data.get('name'),
-                    "store": product_data.get('store')
-                })
+            product_image_url = "https://example.com/images/default.jpg"
+            if product_data and product_data.get('imageUrl'):
+                product_image_url = product_data.get('imageUrl')
+
+            final_product_list.append({
+                "imageUrl": product_image_url,
+                "type": rec.get("type"),
+                "price": rec.get("price", 0.0),
+                "name": product_name,
+                "store": rec.get("store", "N/A")
+            })
 
         return jsonify(final_product_list), 200
 
