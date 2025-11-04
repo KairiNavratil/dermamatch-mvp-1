@@ -94,7 +94,7 @@ EXAMPLE OUTPUT:
 """
 
 model_analyzer = genai.GenerativeModel(
-    model_name="models/gemini-2.5-pro",
+    model_name="models/gemini-2.5-flash",
     system_instruction=ANALYZER_PROMPT,
     generation_config={"response_mime_type": "application/json"}
 )
