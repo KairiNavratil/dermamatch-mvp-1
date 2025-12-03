@@ -1,205 +1,246 @@
 import os
 import google.generativeai as genai
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from dotenv import load_dotenv
 import PIL.Image
 import io
 import json
 import pandas as pd
 import random
+from face_mapper import FaceMapper
 
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
+mapper = FaceMapper()
+
+# --- DATABASE LOADING ---
+product_db = pd.DataFrame()
 try:
-    product_db = pd.read_csv("cleaned_products.csv")
-    product_db['name'] = product_db['name'].fillna('').astype(str)
-    product_db['ingredients_str'] = product_db['ingredients_str'].fillna('').astype(str)
-    print(f"Successfully loaded cleaned_products.csv. {len(product_db)} products ready.")
-except FileNotFoundError:
-    print("FATAL ERROR: cleaned_products.csv not found.")
-    product_db = pd.DataFrame()
+    if os.path.exists("cleaned_products.csv"):
+        product_db = pd.read_csv("cleaned_products.csv")
+        cols_to_str = ['name', 'brand', 'ingredients_str', 'type']
+        for col in cols_to_str:
+            if col in product_db.columns:
+                product_db[col] = product_db[col].fillna('').astype(str)
+            else:
+                product_db[col] = '' 
 
-ANALYZER_PROMPT = """
-You are a 'Derma-AI' visual analyzer. You are an expert dermatologist.
-Your ONLY job is to analyze a user's image and questionnaire data and
-return a JSON object describing their skin profile.
+        if 'price' in product_db.columns:
+            product_db['price'] = product_db['price'].fillna(0)
+        else:
+            product_db['price'] = 0
 
-INPUTS:
-- Image: A picture of the user's face.
-- question1: Sensitivity score (1-5, 5=very sensitive).
-- question2: Makeup frequency ("Daily", "A few times a week", "Rarely, or never").
+        if 'store' in product_db.columns:
+            product_db['store'] = product_db['store'].fillna('')
+        else:
+            product_db['store'] = ''
 
-ANALYSIS RULES:
-1.  **Visual Analysis:** From the image, identify Skin Type (Oily, Dry, Combo),
-    and a list of specific visual concerns (e.g., "comedonal acne", "pustular acne",
-    "hyperpigmentation", "dullness", "fine lines on forehead", "redness on cheeks").
-    Be as specific as possible.
-2.  **Data Analysis:** Integrate the questionnaire data.
+        product_db['type'] = product_db['type'].str.upper().str.strip()
+        print(f"✅ Loaded Product DB: {len(product_db)} items.")
+    else:
+        print("⚠️ WARNING: cleaned_products.csv not found.")
+except Exception as e:
+    print(f"❌ Error loading DB: {e}")
 
-OUTPUT:
-Return ONLY a valid JSON object in this exact format. Do not add any other text.
+def get_product_candidates(product_type, limit=50):
+    if product_db.empty: return []
+    candidates = product_db[product_db['type'] == product_type.upper()]
+    if candidates.empty: return []
+    sample_size = min(len(candidates), limit)
+    sample = candidates.sample(sample_size)
+    return sample[['name', 'brand', 'ingredients_str', 'imageUrl', 'price', 'store']].to_dict(orient='records')
 
-EXAMPLE OUTPUT:
-{
-  "skin_type": "Combination",
-  "concerns": ["Comedonal Acne", "Hyperpigmentation", "Oily T-Zone", "Dehydrated Cheeks"],
-  "sensitivity": 5,
-  "makeup_use": "Daily"
-}
+# --- 1. VISUAL ANALYSIS PROMPT (Handle 468 Landmarks) ---
+ANALYSIS_PROMPT = """
+You are a 'Derma-AI' specialist. 
+Your goal is to analyze a selfie for skin features and map them to the CLOSEST matching point from the provided mesh.
+
+INPUT DATA:
+1. An image of a face.
+2. A complete list of 468 Facial Landmarks ("Mesh Points").
+   - Each point has an ID (e.g., "id_10") and a semantic Region (e.g., "Forehead", "Nose").
+
+YOUR TASK:
+1. visually scan the image for skin features (acne, hyperpigmentation, texture, wrinkles).
+2. For EACH feature found:
+   - Identify its visual center.
+   - Look at the provided Mesh Points.
+   - Find the SINGLE point ID that is physically closest to that feature.
+   - Use the 'region' tags to help narrow down your search (e.g., if acne is on the nose, look at points labeled 'Nose').
+
+CRITICAL RULES:
+- **Precision:** Do not guess. Pick the exact ID.
+- **Output:** JSON Array only.
+
+OUTPUT FORMAT:
+[
+  {
+    "anchor_code": "id_152",
+    "title": "Chin Papule",
+    "description": "Inflamed spot on the chin center."
+  }
+]
 """
 
-RECOMMENDER_PROMPT = """
-You are a 'Derma-AI' product recommender. You are an expert cosmetic chemist.
-Your ONLY job is to find the single best product from *each* category list
-that matches a user's skin profile.
+# --- 2. ROUTINE GENERATION PROMPT ---
+ROUTINE_PROMPT = """
+You are an elite Cosmetic Chemist AI. Your goal is to curate a highly personalized routine.
 
-INPUTS:
-- **profile**: A JSON object of the user's skin profile.
-- **product_lists**: A JSON object containing 5 arrays of products.
-  (e.g., "CLEANSER": [...], "TONER": [...], etc.)
+INPUT DATA:
+1. User Image (Visual context).
+2. Survey Answers (Habits, Sensitivity).
+3. **Product Candidates**: List of available products.
 
-TASK:
-1.  Analyze the user's **profile**.
-2.  For **each** of the 5 product lists provided (CLEANSER, TONER, etc.):
-3.  Examine the **ingredient list (`ingredients_str`)** of every product in that list.
-4.  Find the **one** product from that specific list whose ingredients *best*
-    target the user's **concerns** while respecting their **sensitivity**.
-5.  Based on the product's name and brand, provide a *realistic estimated price*
-    (as a number, e.g., 24.99) and a *common store* (e.g., "Sephora", "Target").
-6.  Return ONLY a valid JSON object containing an array named "recommendations".
-    Each item in the array must have all 5 of these keys.
+YOUR TASK:
+1. **Analyze the User:** Combine visual needs + survey data.
+2. **Select Products:** For each step (Cleanser, Treatment, Moisturizer, SPF), pick the BEST match based on ingredients.
+3. **ESTIMATE MISSING DATA:** If 'price' is 0 or 'store' is empty, ESTIMATE them based on the brand's typical market positioning.
 
-EXAMPLE OUTPUT:
+OUTPUT FORMAT (JSON):
 {
-  "recommendations": [
+  "routine": [
     {
-      "type": "CLEANSER",
-      "best_product_name": "CeraVe SA Cleanser",
-      "reasoning": "Selected for its Salicylic Acid to target 'Comedonal Acne', while being fragrance-free for 'high sensitivity'.",
-      "price": 14.99,
-      "store": "Target"
-    },
-    {
-      "type": "TONER",
-      "best_product_name": "Anua Heartleaf 77% Soothing Toner",
-      "reasoning": "The Houttuynia Cordata is excellent for calming the redness and irritation seen in the profile.",
-      "price": 22.50,
-      "store": "Amazon"
+      "step": "Cleanser",
+      "product_name": "Name",
+      "brand": "Brand",
+      "price": "Number",
+      "store": "String",
+      "image_url": "URL",
+      "benefits": [ { "title": "Benefit", "description": "..." } ]
     }
   ]
 }
 """
 
-model_analyzer = genai.GenerativeModel(
-    model_name="models/gemini-2.5-flash",
-    system_instruction=ANALYZER_PROMPT,
+# --- INITIALIZE MODELS ---
+visual_model = genai.GenerativeModel(
+    model_name="gemini-2.5-flash-preview-09-2025", 
+    system_instruction=ANALYSIS_PROMPT,
     generation_config={"response_mime_type": "application/json"}
 )
 
-model_recommender = genai.GenerativeModel(
-    model_name="models/gemini-2.5-flash-lite",
-    system_instruction=RECOMMENDER_PROMPT,
+routine_model = genai.GenerativeModel(
+    model_name="gemini-2.5-flash-preview-09-2025", 
+    system_instruction=ROUTINE_PROMPT,
     generation_config={"response_mime_type": "application/json"}
 )
-
-def get_product_by_name(name):
-    if product_db.empty or name is None:
-        return None
-    
-    result = product_db[product_db['name'].str.lower() == name.lower()]
-    
-    if not result.empty:
-        return result.iloc[0].to_dict()
-    return None
-
-def get_product_sample(product_type, sample_size=10):
-    if product_db.empty:
-        return []
-    
-    candidate_df = product_db[product_db['type'] == product_type]
-    if candidate_df.empty:
-        return []
-    
-    actual_sample_size = min(len(candidate_df), sample_size)
-    product_sample = candidate_df.sample(actual_sample_size)
-    
-    return product_sample[['name', 'ingredients_str']].to_dict(orient='records')
-
 
 @app.route('/recommend-image', methods=['POST'])
 def get_image_recommendation():
+    """Endpoint 1: Visual Analysis (Points of Interest)"""
     try:
         if 'image' not in request.files:
             return jsonify({"error": "No image file provided"}), 400
-        file = request.files['image']
-        img = PIL.Image.open(io.BytesIO(file.read()))
-
-        if 'data' not in request.form:
-            return jsonify({"error": "No JSON data provided"}), 400
-        data_str = request.form['data']
-        user_data = json.loads(data_str)
         
-        sensitivity = user_data.get('question1', 1)
-        makeup = user_data.get('question2', "Rarely, or never")
+        file = request.files['image']
+        img_bytes = file.read()
+        
+        face_data = mapper.get_face_landmarks(img_bytes)
+        if not face_data:
+            return jsonify({"error": "No face detected in image."}), 400
 
-        analyzer_user_prompt = f"""
-        Analyze the attached image and the following user data:
-        - question1 (sensitivity 1-5): {sensitivity}
-        - question2 (makeup use): "{makeup}"
+        # PREPARE FULL 468-POINT LIST FOR AI & DEBUG
+        # We simplify the list for the AI to save tokens (remove pixels, keep ID/Region)
+        ai_landmark_context = []
+        all_landmarks_debug = []
+        
+        for code, data in face_data['landmarks'].items():
+            # For Frontend (Needs x/y %)
+            x_pct = (data['x'] / face_data['width']) * 100
+            y_pct = (data['y'] / face_data['height']) * 100
+            
+            all_landmarks_debug.append({
+                "code": code,
+                "x": x_pct,
+                "y": y_pct,
+                "region": data['region']
+            })
+            
+            # For AI (Needs Code + Region hint)
+            # We don't send X/Y pixels to AI because it sees the image directly.
+            # It just needs to know "id_10 is Forehead Center".
+            ai_landmark_context.append(f"{code}: {data['region']}")
+
+        img_pil = PIL.Image.open(io.BytesIO(img_bytes))
+        
+        user_prompt = f"""
+        Analyze this image. 
+        Here are the available Mesh Points on this specific face:
+        {json.dumps(ai_landmark_context)}
+        
+        Map features to the closest ID.
         """
 
-        print("Calling Analyzer AI...")
-        response = model_analyzer.generate_content([analyzer_user_prompt, img])
-        skin_profile = json.loads(response.text)
-        print(f"Analyzer AI returned profile: {skin_profile}")
+        response = visual_model.generate_content([user_prompt, img_pil])
+        ai_results = json.loads(response.text)
+        
+        final_response = []
+        for item in ai_results:
+            code = item.get('anchor_code')
+            if code in face_data['landmarks']:
+                coords = face_data['landmarks'][code]
+                x_pct = (coords['x'] / face_data['width']) * 100
+                y_pct = (coords['y'] / face_data['height']) * 100
+                final_response.append({
+                    "x": x_pct,
+                    "y": y_pct,
+                    "title": item.get('title'),
+                    "description": item.get('description'),
+                    "anchor_used": code
+                })
+        
+        return jsonify({
+            "analysis": final_response,
+            "all_landmarks": all_landmarks_debug
+        }), 200
 
-        print("Building product lists for Recommender AI...")
-        product_lists_for_ai = {
-            "CLEANSER": get_product_sample("CLEANSER", 10),
-            "TONER": get_product_sample("TONER", 10),
-            "SERUM": get_product_sample("SERUM", 10),
-            "MOISTURIZER": get_product_sample("MOISTURIZER", 10),
-            "SUNSCREEN": get_product_sample("SUNSCREEN", 10)
+    except Exception as e:
+        print(f"Error in /recommend-image: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/recommend-routine', methods=['POST'])
+def get_routine_recommendation():
+    """Endpoint 2: Database-Backed Routine Generation with Estimation"""
+    try:
+        if 'image' not in request.files:
+            return jsonify({"error": "No image file provided"}), 400
+        
+        file = request.files['image']
+        img_bytes = file.read()
+        img_pil = PIL.Image.open(io.BytesIO(img_bytes))
+
+        survey_data_str = request.form.get('data')
+        if not survey_data_str:
+            return jsonify({"error": "No survey data provided"}), 400
+        survey_data = json.loads(survey_data_str)
+
+        candidates = {
+            "Cleanser": get_product_candidates("CLEANSER", 50),
+            "Treatment": get_product_candidates("SERUM", 50), 
+            "Moisturizer": get_product_candidates("MOISTURIZER", 50),
+            "SPF": get_product_candidates("SUNSCREEN", 50)
         }
 
-        recommender_prompt = f"""
-        "profile": {json.dumps(skin_profile)},
-        "product_lists": {json.dumps(product_lists_for_ai)}
+        user_prompt = f"""
+        Generate a skincare routine.
+        SURVEY: {json.dumps(survey_data, indent=2)}
+        CANDIDATES: {json.dumps(candidates, indent=2)}
         """
 
-        print("Calling Recommender AI (Mega-Call)...")
-        response = model_recommender.generate_content(recommender_prompt)
-        recommendations = json.loads(response.text).get("recommendations", [])
-        print(f"Recommender AI returned {len(recommendations)} products.")
+        response = routine_model.generate_content([user_prompt, img_pil])
+        routine_results = json.loads(response.text)
+        
+        return jsonify(routine_results), 200
 
-        final_product_list = []
-        for rec in recommendations:
-            product_name = rec.get("best_product_name")
-            product_data = get_product_by_name(product_name)
-            
-            product_image_url = "https://example.com/images/default.jpg"
-            if product_data and product_data.get('imageUrl'):
-                product_image_url = product_data.get('imageUrl')
-
-            final_product_list.append({
-                "imageUrl": product_image_url,
-                "type": rec.get("type"),
-                "price": rec.get("price", 0.0),
-                "name": product_name,
-                "store": rec.get("store", "N/A")
-            })
-
-        return jsonify(final_product_list), 200
-
-    except json.JSONDecodeError:
-        print(f"Error: Invalid JSON string provided in 'data' field.")
-        return jsonify({"error": "Invalid JSON string in 'data' field."}), 400
     except Exception as e:
-        print(f"Error: {e}")
-        return jsonify({"error": "Failed to process recommendation"}), 500
+        print(f"Error in /recommend-routine: {e}")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
