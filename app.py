@@ -18,7 +18,7 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 
 mapper = FaceMapper()
 
-# --- DATABASE LOADING ---
+# --- DATABASE LOADING (Unchanged) ---
 product_db = pd.DataFrame()
 try:
     if os.path.exists("cleaned_products.csv"):
@@ -55,26 +55,26 @@ def get_product_candidates(product_type, limit=50):
     sample = candidates.sample(sample_size)
     return sample[['name', 'brand', 'ingredients_str', 'imageUrl', 'price', 'store']].to_dict(orient='records')
 
-# --- 1. VISUAL ANALYSIS PROMPT (Handle 468 Landmarks) ---
+# --- 1. VISUAL ANALYSIS PROMPT (Coordinate-Aware) ---
 ANALYSIS_PROMPT = """
 You are a 'Derma-AI' specialist. 
-Your goal is to analyze a selfie for skin features and map them to the CLOSEST matching point from the provided mesh.
+Your goal is to analyze a selfie for skin features and map them to the PRECISELY matching point from the provided mesh.
 
 INPUT DATA:
 1. An image of a face.
 2. A complete list of 468 Facial Landmarks ("Mesh Points").
-   - Each point has an ID (e.g., "id_10") and a semantic Region (e.g., "Forehead", "Nose").
+   - Each point has an ID, a Region Name, and **X/Y Coordinates (0-100%)**.
 
 YOUR TASK:
-1. visually scan the image for skin features (acne, hyperpigmentation, texture, wrinkles).
-2. For EACH feature found:
-   - Identify its visual center.
-   - Look at the provided Mesh Points.
-   - Find the SINGLE point ID that is physically closest to that feature.
-   - Use the 'region' tags to help narrow down your search (e.g., if acne is on the nose, look at points labeled 'Nose').
+1. **Visual Scan:** Identify skin features (acne, texture, redness) on the image.
+2. **Triangulate:**
+   - Estimate the X/Y position of the feature you see (e.g., "This pimple is roughly at 50% width, 60% height").
+   - Scan the provided list of Mesh Points.
+   - Find the ID whose X/Y coordinates are MATHEMATICALLY CLOSEST to your estimated feature location.
+   - Use the 'Region' name only as a sanity check (e.g., ensure you aren't mapping a nose pimple to a cheek point).
 
 CRITICAL RULES:
-- **Precision:** Do not guess. Pick the exact ID.
+- **Precision:** Do not just pick a random point in the region. Compare the coordinates!
 - **Output:** JSON Array only.
 
 OUTPUT FORMAT:
@@ -87,7 +87,7 @@ OUTPUT FORMAT:
 ]
 """
 
-# --- 2. ROUTINE GENERATION PROMPT ---
+# --- 2. ROUTINE GENERATION PROMPT (Unchanged) ---
 ROUTINE_PROMPT = """
 You are an elite Cosmetic Chemist AI. Your goal is to curate a highly personalized routine.
 
@@ -145,15 +145,15 @@ def get_image_recommendation():
             return jsonify({"error": "No face detected in image."}), 400
 
         # PREPARE FULL 468-POINT LIST FOR AI & DEBUG
-        # We simplify the list for the AI to save tokens (remove pixels, keep ID/Region)
         ai_landmark_context = []
         all_landmarks_debug = []
         
         for code, data in face_data['landmarks'].items():
-            # For Frontend (Needs x/y %)
+            # Calculate percentages
             x_pct = (data['x'] / face_data['width']) * 100
             y_pct = (data['y'] / face_data['height']) * 100
             
+            # 1. For Frontend Debugging (Overlay)
             all_landmarks_debug.append({
                 "code": code,
                 "x": x_pct,
@@ -161,19 +161,24 @@ def get_image_recommendation():
                 "region": data['region']
             })
             
-            # For AI (Needs Code + Region hint)
-            # We don't send X/Y pixels to AI because it sees the image directly.
-            # It just needs to know "id_10 is Forehead Center".
-            ai_landmark_context.append(f"{code}: {data['region']}")
+            # 2. For AI Context (Text List)
+            # KEY CHANGE: We now include the exact X/Y % in the string sent to Gemini.
+            # This allows the AI to "triangulate" the feature location mathematically.
+            ai_string = f"ID: {code} | Region: {data['region']} | Location: X={x_pct:.1f}%, Y={y_pct:.1f}%"
+            ai_landmark_context.append(ai_string)
 
         img_pil = PIL.Image.open(io.BytesIO(img_bytes))
         
         user_prompt = f"""
         Analyze this image. 
-        Here are the available Mesh Points on this specific face:
+        
+        Here is the MAP of the face with exact coordinates:
         {json.dumps(ai_landmark_context)}
         
-        Map features to the closest ID.
+        INSTRUCTION: 
+        1. Find a blemish visually.
+        2. Estimate its X/Y coordinates on the image.
+        3. Find the ID in the list above that has the CLOSEST coordinates.
         """
 
         response = visual_model.generate_content([user_prompt, img_pil])
