@@ -12,66 +12,88 @@ class FaceMapper:
             min_detection_confidence=0.5
         )
 
+        # PRE-DEFINED SEMANTIC MAP
+        # Maps specific landmark indices to granular text descriptions.
         self.landmark_map = {}
-        self._initialize_full_mesh_map()
+        self._initialize_landmark_map()
 
-    def _initialize_full_mesh_map(self):
+    def _initialize_landmark_map(self):
         """
-        Maps ALL 468 MediaPipe landmarks to semantic regions.
-        We use broader categories to avoid mislabeling edge cases.
+        Populates the landmark_map with specific regions.
+        Source: Standard MediaPipe Face Mesh Topology.
         """
-        # 1. LIPS (Inner & Outer)
-        lips = set(range(0, 100)).intersection({0, 13, 14, 17, 37, 39, 40, 61, 80, 81, 82, 84, 87, 88, 91, 95})
-        lips.update({146, 178, 181, 185, 191, 267, 269, 270, 291, 310, 311, 312, 314, 317, 318, 321, 324, 375, 402, 405, 409, 415})
-        self._map_indices(list(lips), "Lips")
+        # --- NOSE ---
+        self._map_indices([1, 4, 5, 195, 197], "Nose Tip")
+        self._map_indices([6, 168, 8, 351, 417], "Nose Bridge - Upper") # Glabella area
+        self._map_indices([122, 196, 174, 198, 49, 131], "Nose - Right Nostril/Base")
+        self._map_indices([351, 419, 456, 279, 360], "Nose - Left Nostril/Base")
+        self._map_indices([218, 219, 220, 237], "Nose - Right Wing")
+        self._map_indices([438, 439, 440, 457], "Nose - Left Wing")
 
-        # 2. LEFT EYE (Subject's Left)
-        # Includes lids, corners, and immediate perimeter
-        left_eye = {263, 249, 390, 373, 374, 380, 381, 382, 362, 466, 388, 387, 386, 385, 384, 398, 469, 470, 471, 472}
-        self._map_indices(list(left_eye), "Left Eye Area")
+        # --- LIPS ---
+        self._map_indices([0, 267, 269, 37, 39, 40, 185], "Upper Lip - Center")
+        self._map_indices([61, 146, 91, 181, 84], "Upper Lip - Right Corner")
+        self._map_indices([291, 375, 321, 405, 314], "Upper Lip - Left Corner")
+        self._map_indices([17, 18, 200, 314, 402, 83], "Lower Lip - Center")
+        self._map_indices([78, 95, 88, 178, 87, 14], "Lower Lip - Right Side")
+        self._map_indices([308, 324, 318, 402, 317, 14], "Lower Lip - Left Side")
+        self._map_indices([164, 0, 267], "Philtrum (Above Lip)")
 
-        # 3. RIGHT EYE (Subject's Right)
-        right_eye = {33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246, 474, 475, 476, 477}
-        self._map_indices(list(right_eye), "Right Eye Area")
+        # --- CHIN ---
+        self._map_indices([152, 199, 175], "Chin - Center Tip")
+        self._map_indices([377, 378, 379, 365], "Chin - Left Side")
+        self._map_indices([148, 149, 150, 136], "Chin - Right Side")
+        self._map_indices([200, 201, 194, 32, 262], "Chin - Upper Crease")
 
-        # 4. LEFT EYEBROW
-        left_brow = {276, 282, 283, 285, 293, 295, 296, 300, 334, 336, 298, 301, 299, 284}
-        self._map_indices(list(left_brow), "Left Eyebrow")
+        # --- EYES (RIGHT - Subject's Right) ---
+        self._map_indices([33, 246, 161, 160, 159, 158, 157, 173], "Right Eye - Upper Lid")
+        self._map_indices([163, 144, 145, 153, 154, 155, 133], "Right Eye - Lower Lid")
+        self._map_indices([133, 173, 155, 154], "Right Eye - Inner Corner")
+        self._map_indices([33, 7, 163, 144], "Right Eye - Outer Corner")
+        # Right Under Eye (Orbital) - CRITICAL AREA
+        self._map_indices([116, 117, 118, 119, 100, 101], "Right Under Eye - Upper Orbital")
+        self._map_indices([230, 229, 228, 226, 31], "Right Under Eye - Lower Orbital")
+        self._map_indices([35, 124, 46, 53, 52, 65, 55], "Right Eyebrow")
 
-        # 5. RIGHT EYEBROW
-        right_brow = {46, 52, 53, 55, 63, 65, 66, 70, 105, 107, 68, 71, 69, 54}
-        self._map_indices(list(right_brow), "Right Eyebrow")
+        # --- EYES (LEFT - Subject's Left) ---
+        self._map_indices([263, 466, 388, 387, 386, 385, 384, 398], "Left Eye - Upper Lid")
+        self._map_indices([362, 382, 381, 380, 374, 373, 390, 249], "Left Eye - Lower Lid")
+        self._map_indices([362, 398, 384, 385], "Left Eye - Inner Corner")
+        self._map_indices([263, 249, 390, 373], "Left Eye - Outer Corner")
+        # Left Under Eye (Orbital)
+        self._map_indices([345, 346, 347, 348, 329, 330], "Left Under Eye - Upper Orbital")
+        self._map_indices([450, 449, 448, 446, 261], "Left Under Eye - Lower Orbital")
+        self._map_indices([265, 353, 276, 283, 282, 295, 285], "Left Eyebrow")
 
-        # 6. NOSE (Entire Structure)
-        # Tip, Bridge, Nostrils, and the immediate slopes
-        nose = {1, 2, 4, 5, 6, 168, 195, 197, 279, 49, 278, 48, 218, 219, 220, 275, 438, 439, 440, 294, 19, 94, 274, 456, 281}
-        self._map_indices(list(nose), "Nose Region")
+        # --- CHEEKS (RIGHT) ---
+        self._map_indices([50, 205, 203, 206, 207], "Right Cheek - Apple (Center)")
+        self._map_indices([123, 147, 192, 213, 216], "Right Cheek - Inner (Near Nose)")
+        self._map_indices([227, 34, 111, 116], "Right Cheek - Upper (Bone)")
+        self._map_indices([127, 234, 93, 132], "Right Cheek - Outer (Near Ear)")
+        self._map_indices([210, 214, 212, 57], "Right Cheek - Lower (Near Jaw)")
 
-        # 7. FOREHEAD
-        # Central and side forehead, excluding temples which are separate
-        forehead = {10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109, 8, 9, 107, 66, 69, 109, 103, 67, 336, 296, 299, 338, 332, 297, 337, 336, 296, 293, 334, 295, 151, 108, 104, 68, 71}
-        self._map_indices(list(forehead), "Forehead")
+        # --- CHEEKS (LEFT) ---
+        self._map_indices([280, 425, 423, 426, 427], "Left Cheek - Apple (Center)")
+        self._map_indices([352, 376, 416, 433, 436], "Left Cheek - Inner (Near Nose)")
+        self._map_indices([447, 264, 340, 345], "Left Cheek - Upper (Bone)")
+        self._map_indices([356, 454, 323, 361], "Left Cheek - Outer (Near Ear)")
+        self._map_indices([430, 434, 432, 287], "Left Cheek - Lower (Near Jaw)")
 
-        # 8. CHIN
-        chin = {152, 199, 175, 200, 18, 83, 313, 18, 200, 175, 152}
-        self._map_indices(list(chin), "Chin")
-
-        # 9. CHEEKS (The Rest)
-        # We assume anything not defined above is likely cheek/skin/jaw.
-        # We split roughly by index ranges or coordinate logic if needed, 
-        # but for now, we rely on the specific lists below.
+        # --- FOREHEAD ---
+        self._map_indices([10, 151, 9], "Forehead - Center Low")
+        self._map_indices([109, 67, 103], "Forehead - Center High")
+        self._map_indices([338, 337, 299, 296], "Forehead - Left Low")
+        self._map_indices([297, 332, 284], "Forehead - Left High")
+        self._map_indices([109, 108, 69, 66], "Forehead - Right Low")
+        self._map_indices([67, 103, 54], "Forehead - Right High")
+        self._map_indices([68, 104, 63, 105], "Forehead - Right Temple")
+        self._map_indices([298, 333, 293, 334], "Forehead - Left Temple")
         
-        # Right Cheek Specifics
-        right_cheek = {50, 205, 203, 142, 123, 147, 213, 192, 214, 212, 138, 135, 216, 206, 207, 211, 210, 209, 126, 47, 121, 120, 111, 36, 101, 227, 137, 177, 215, 138, 135, 169, 170, 171, 140, 141, 142}
-        self._map_indices(list(right_cheek), "Right Cheek Region")
-
-        # Left Cheek Specifics
-        left_cheek = {280, 425, 423, 371, 352, 376, 433, 416, 434, 432, 367, 364, 436, 426, 427, 431, 430, 429, 355, 277, 350, 349, 340, 266, 330, 447, 366, 401, 435, 367, 364, 394, 395, 396, 369, 370, 371}
-        self._map_indices(list(left_cheek), "Left Cheek Region")
-        
-        # 10. JAWLINE
-        jaw = {172, 136, 150, 149, 176, 397, 365, 379, 378, 400, 127, 234, 93, 132, 58, 356, 454, 323, 361, 288}
-        self._map_indices(list(jaw), "Jawline")
+        # --- JAWLINE ---
+        self._map_indices([172, 136, 150, 149, 176], "Jawline - Right")
+        self._map_indices([397, 365, 379, 378, 400], "Jawline - Left")
+        self._map_indices([127, 234, 93, 132, 58], "Jaw Angle - Right")
+        self._map_indices([356, 454, 323, 361, 288], "Jaw Angle - Left")
 
     def _map_indices(self, indices, description):
         for idx in indices:
@@ -93,6 +115,7 @@ class FaceMapper:
         mapped_coordinates = {}
         for idx, lm in enumerate(landmarks):
             region = self.get_region_for_index(idx)
+            # We treat every point as a potential anchor now
             key = f"id_{idx}"
             mapped_coordinates[key] = {
                 "x": int(lm.x * width),

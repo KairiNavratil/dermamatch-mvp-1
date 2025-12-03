@@ -1,4 +1,6 @@
 import os
+import logging
+import sys
 import google.generativeai as genai
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -10,19 +12,50 @@ import pandas as pd
 import random
 from face_mapper import FaceMapper
 
+# --- LOGGING SETUP ---
+# This ensures logs print to the Render console immediately
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 app = Flask(__name__)
+# Enable CORS for all domains
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 mapper = FaceMapper()
 
-# --- DATABASE LOADING (Unchanged) ---
+# --- REQUEST HOOKS ---
+@app.before_request
+def log_request_info():
+    """Log incoming request details immediately."""
+    logger.info(f"👉 INCOMING: {request.method} {request.path}")
+
+@app.after_request
+def log_response_info(response):
+    """Log response status after processing."""
+    logger.info(f"✅ COMPLETED: {request.path} - Status: {response.status_code}")
+    return response
+
+# --- HEALTH CHECK ROUTE ---
+@app.route('/', methods=['GET'])
+def health_check():
+    """Simple route to check if server is awake."""
+    return jsonify({"status": "online", "message": "DermaMatch API is running"}), 200
+
+# --- DATABASE LOADING ---
 product_db = pd.DataFrame()
 try:
     if os.path.exists("cleaned_products.csv"):
+        logger.info("Loading product database...")
         product_db = pd.read_csv("cleaned_products.csv")
+        
+        # Normalize columns
         cols_to_str = ['name', 'brand', 'ingredients_str', 'type']
         for col in cols_to_str:
             if col in product_db.columns:
@@ -41,11 +74,11 @@ try:
             product_db['store'] = ''
 
         product_db['type'] = product_db['type'].str.upper().str.strip()
-        print(f"✅ Loaded Product DB: {len(product_db)} items.")
+        logger.info(f"✅ Loaded Product DB: {len(product_db)} items.")
     else:
-        print("⚠️ WARNING: cleaned_products.csv not found.")
+        logger.warning("⚠️ WARNING: cleaned_products.csv not found.")
 except Exception as e:
-    print(f"❌ Error loading DB: {e}")
+    logger.error(f"❌ Error loading DB: {e}")
 
 def get_product_candidates(product_type, limit=50):
     if product_db.empty: return []
@@ -55,7 +88,7 @@ def get_product_candidates(product_type, limit=50):
     sample = candidates.sample(sample_size)
     return sample[['name', 'brand', 'ingredients_str', 'imageUrl', 'price', 'store']].to_dict(orient='records')
 
-# --- 1. VISUAL ANALYSIS PROMPT (Coordinate-Aware) ---
+# --- 1. VISUAL ANALYSIS PROMPT ---
 ANALYSIS_PROMPT = """
 You are a 'Derma-AI' specialist. 
 Your goal is to analyze a selfie for skin features and map them to the PRECISELY matching point from the provided mesh.
@@ -71,7 +104,7 @@ YOUR TASK:
    - Estimate the X/Y position of the feature you see (e.g., "This pimple is roughly at 50% width, 60% height").
    - Scan the provided list of Mesh Points.
    - Find the ID whose X/Y coordinates are MATHEMATICALLY CLOSEST to your estimated feature location.
-   - Use the 'Region' name only as a sanity check (e.g., ensure you aren't mapping a nose pimple to a cheek point).
+   - Use the 'Region' name only as a sanity check.
 
 CRITICAL RULES:
 - **Precision:** Do not just pick a random point in the region. Compare the coordinates!
@@ -87,7 +120,7 @@ OUTPUT FORMAT:
 ]
 """
 
-# --- 2. ROUTINE GENERATION PROMPT (Unchanged) ---
+# --- 2. ROUTINE GENERATION PROMPT ---
 ROUTINE_PROMPT = """
 You are an elite Cosmetic Chemist AI. Your goal is to curate a highly personalized routine.
 
@@ -134,14 +167,18 @@ routine_model = genai.GenerativeModel(
 def get_image_recommendation():
     """Endpoint 1: Visual Analysis (Points of Interest)"""
     try:
+        logger.info("--- Starting /recommend-image ---")
         if 'image' not in request.files:
+            logger.error("No image file provided")
             return jsonify({"error": "No image file provided"}), 400
         
         file = request.files['image']
         img_bytes = file.read()
         
+        logger.info("Running MediaPipe...")
         face_data = mapper.get_face_landmarks(img_bytes)
         if not face_data:
+            logger.warning("No face detected by MediaPipe")
             return jsonify({"error": "No face detected in image."}), 400
 
         # PREPARE FULL 468-POINT LIST FOR AI & DEBUG
@@ -149,11 +186,9 @@ def get_image_recommendation():
         all_landmarks_debug = []
         
         for code, data in face_data['landmarks'].items():
-            # Calculate percentages
             x_pct = (data['x'] / face_data['width']) * 100
             y_pct = (data['y'] / face_data['height']) * 100
             
-            # 1. For Frontend Debugging (Overlay)
             all_landmarks_debug.append({
                 "code": code,
                 "x": x_pct,
@@ -161,9 +196,6 @@ def get_image_recommendation():
                 "region": data['region']
             })
             
-            # 2. For AI Context (Text List)
-            # KEY CHANGE: We now include the exact X/Y % in the string sent to Gemini.
-            # This allows the AI to "triangulate" the feature location mathematically.
             ai_string = f"ID: {code} | Region: {data['region']} | Location: X={x_pct:.1f}%, Y={y_pct:.1f}%"
             ai_landmark_context.append(ai_string)
 
@@ -171,7 +203,6 @@ def get_image_recommendation():
         
         user_prompt = f"""
         Analyze this image. 
-        
         Here is the MAP of the face with exact coordinates:
         {json.dumps(ai_landmark_context)}
         
@@ -181,7 +212,10 @@ def get_image_recommendation():
         3. Find the ID in the list above that has the CLOSEST coordinates.
         """
 
+        logger.info("Sending request to Gemini...")
         response = visual_model.generate_content([user_prompt, img_pil])
+        logger.info("Gemini response received.")
+        
         ai_results = json.loads(response.text)
         
         final_response = []
@@ -199,13 +233,14 @@ def get_image_recommendation():
                     "anchor_used": code
                 })
         
+        logger.info(f"Returning {len(final_response)} visual features.")
         return jsonify({
             "analysis": final_response,
             "all_landmarks": all_landmarks_debug
         }), 200
 
     except Exception as e:
-        print(f"Error in /recommend-image: {e}")
+        logger.exception("Error in /recommend-image")
         return jsonify({"error": str(e)}), 500
 
 
@@ -213,6 +248,7 @@ def get_image_recommendation():
 def get_routine_recommendation():
     """Endpoint 2: Database-Backed Routine Generation with Estimation"""
     try:
+        logger.info("--- Starting /recommend-routine ---")
         if 'image' not in request.files:
             return jsonify({"error": "No image file provided"}), 400
         
@@ -225,6 +261,7 @@ def get_routine_recommendation():
             return jsonify({"error": "No survey data provided"}), 400
         survey_data = json.loads(survey_data_str)
 
+        logger.info("Fetching candidates...")
         candidates = {
             "Cleanser": get_product_candidates("CLEANSER", 50),
             "Treatment": get_product_candidates("SERUM", 50), 
@@ -238,13 +275,15 @@ def get_routine_recommendation():
         CANDIDATES: {json.dumps(candidates, indent=2)}
         """
 
+        logger.info("Sending request to Gemini...")
         response = routine_model.generate_content([user_prompt, img_pil])
         routine_results = json.loads(response.text)
         
+        logger.info("Routine generated successfully.")
         return jsonify(routine_results), 200
 
     except Exception as e:
-        print(f"Error in /recommend-routine: {e}")
+        logger.exception("Error in /recommend-routine")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
