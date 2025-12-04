@@ -196,19 +196,20 @@ YOUR TASK:
 
 CRITICAL RULES:
 - **Precision:** Do not just pick a random point in the region. Compare the coordinates!
+- **No Location Text:** Do NOT describe the location (e.g. "left cheek", "at 50% height") in the title or description. The UI marker shows the location. Focus strictly on WHAT the issue is (e.g. "Inflamed Papule", "Dry Patch").
 - **Output:** JSON Array only.
 
 OUTPUT FORMAT:
 [
   {
     "anchor_code": "id_152",
-    "title": "Chin Papule",
-    "description": "Inflamed spot on the chin center."
+    "title": "Inflamed Papule",
+    "description": "Redness and slight swelling indicating active inflammation."
   }
 ]
 """
 
-# UPDATED: Re-enabled "Reasoning" but kept it SHORT.
+# UPDATED: Ask for estimated prices/stores
 ROUTINE_PROMPT = """
 You are an elite Cosmetic Chemist AI. Curate a routine by SELECTING items from the inventory.
 
@@ -220,13 +221,19 @@ INPUT:
 TASK:
 1. Analyze user needs.
 2. Scan CATALOG. Pick the BEST product ID for: Cleanser, Toner, Serum, Moisturizer, Sunscreen.
-3. **Personalize:** For each item, write a VERY SHORT (1 sentence) reason why it fits this **skin profile** (avoid addressing the user directly as 'you').
+3. **Data Filling:** Estimate the market price (USD) and a common US retailer (e.g. Sephora, Target, Amazon) for each selected item.
+4. **Personalize:** Write a VERY SHORT (1 sentence) reason why it fits this **skin profile** (avoid addressing the user directly as 'you').
 
 OUTPUT FORMAT (JSON):
 {
   "routine": [
-    { "step": "Cleanser", "inventory_id": 123, "short_reason": "Contains salicylic acid to target chin acne." },
-    { "step": "Toner", "inventory_id": 456, "short_reason": "Calms redness often seen on sensitive cheeks." },
+    { 
+      "step": "Cleanser", 
+      "inventory_id": 123, 
+      "estimated_price": 15.00,
+      "estimated_store": "Target",
+      "short_reason": "Contains salicylic acid to target chin acne." 
+    },
     ...
   ]
 }
@@ -448,15 +455,24 @@ def get_routine_recommendation_real():
                 # Retrieve URL and clean it
                 url_val = row.get('imageUrl', '').strip()
                 
-                # AI Generated Benefit
+                # AI Generated Benefit & Estimates
                 ai_reason = step.get('short_reason', 'Selected based on your skin analysis.')
+                ai_price = step.get('estimated_price', 0)
+                ai_store = step.get('estimated_store', 'Check Retailers')
+
+                # Smart Logic: Use DB value if exists, else fallback to AI estimate
+                db_price = row.get('price', 0)
+                final_price = db_price if db_price > 0 else ai_price
+                
+                db_store = str(row.get('store', '')).strip()
+                final_store = db_store if db_store not in ['', 'N/A', 'nan'] else ai_store
 
                 # Construct Response
                 final_routine.append({
                     "imageUrl": url_val,
                     "name": row['name'],
-                    "price": row.get('price', 0),
-                    "store": row.get('store', ''),
+                    "price": final_price,
+                    "store": final_store,
                     "type": row['type'], 
                     "brand": row['brand'],
                     "benefits": [{"title": "Why this?", "description": ai_reason}] 
