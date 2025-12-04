@@ -10,6 +10,7 @@ import io
 import json
 import pandas as pd
 import random
+import gc 
 from face_mapper import FaceMapper
 
 # --- LOGGING SETUP ---
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# Configure Gemini (Only fails if you try to use the Real endpoints without a key)
+# Configure Gemini
 api_key = os.getenv("GEMINI_API_KEY")
 if api_key:
     genai.configure(api_key=api_key)
@@ -32,9 +33,10 @@ else:
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-mapper = FaceMapper()
+# NOTE: We do NOT initialize mapper = FaceMapper() here anymore.
+# We initialize it inside the route to save memory on Render.
 
-# --- MOCK DATA FOR TEST ENDPOINTS ---
+# --- MOCK DATA ---
 MOCK_ANALYSIS_RESPONSE = {
     "analysis": [
         {
@@ -52,7 +54,6 @@ MOCK_ANALYSIS_RESPONSE = {
             "anchor_used": "mock_id_2"
         }
     ],
-    # Added dummy landmarks so "Debug Mesh" works in frontend during testing
     "all_landmarks": [
         {"code": "mock_id_1", "x": 45.5, "y": 40.2, "region": "Forehead"},
         {"code": "mock_id_2", "x": 60.1, "y": 65.8, "region": "Chin"}
@@ -197,6 +198,7 @@ OUTPUT FORMAT (JSON):
 """
 
 # --- INITIALIZE MODELS ---
+# We keep Gemini global as it's just an API client (low memory)
 try:
     visual_model = genai.GenerativeModel(
         model_name="gemini-2.5-flash-preview-09-2025", 
@@ -233,16 +235,43 @@ def health_check():
 @app.route('/recommend-image', methods=['POST'])
 def get_image_recommendation_real():
     """REAL: Uses MediaPipe + Gemini (Costs Tokens)"""
+    local_mapper = None
     try:
         logger.info("--- Starting /recommend-image (REAL) ---")
         if 'image' not in request.files:
             return jsonify({"error": "No image file provided"}), 400
         
         file = request.files['image']
-        img_bytes = file.read()
+        
+        # --- MEMORY OPTIMIZATION STEP ---
+        # 1. Open image with PIL (efficient)
+        image = PIL.Image.open(file)
+        
+        # 2. Resize if too large (MediaPipe crashes on 4k images in low RAM envs)
+        max_size = 1024
+        if image.width > max_size or image.height > max_size:
+            logger.info(f"Resizing image from {image.size} to max {max_size}px...")
+            image.thumbnail((max_size, max_size))
+            
+        # 3. Convert back to bytes for MediaPipe/Gemini
+        img_byte_arr = io.BytesIO()
+        image.save(img_byte_arr, format=image.format or 'JPEG')
+        img_bytes = img_byte_arr.getvalue()
+        
+        # --- LAZY LOADING MEDIAPIPE ---
+        # Initialize ONLY when needed, then destroy immediately
+        logger.info("Initializing FaceMapper locally...")
+        local_mapper = FaceMapper()
         
         logger.info("Running MediaPipe...")
-        face_data = mapper.get_face_landmarks(img_bytes)
+        face_data = local_mapper.get_face_landmarks(img_bytes)
+        
+        # Force cleanup of MediaPipe C++ resources
+        local_mapper.face_mesh.close()
+        del local_mapper
+        local_mapper = None
+        gc.collect() # Force garbage collection
+        
         if not face_data:
             return jsonify({"error": "No face detected in image."}), 400
 
@@ -263,21 +292,10 @@ def get_image_recommendation_real():
             ai_string = f"ID: {code} | Region: {data['region']} | Location: X={x_pct:.1f}%, Y={y_pct:.1f}%"
             ai_landmark_context.append(ai_string)
 
-        img_pil = PIL.Image.open(io.BytesIO(img_bytes))
-        
-        user_prompt = f"""
-        Analyze this image. 
-        Here is the MAP of the face with exact coordinates:
-        {json.dumps(ai_landmark_context)}
-        
-        INSTRUCTION: 
-        1. Find a blemish visually.
-        2. Estimate its X/Y coordinates on the image.
-        3. Find the ID in the list above that has the CLOSEST coordinates.
-        """
-
         logger.info("Sending request to Gemini...")
-        response = visual_model.generate_content([user_prompt, img_pil])
+        response = visual_model.generate_content([user_prompt, image]) # Pass PIL image directly
+        logger.info("Gemini response received.")
+        
         ai_results = json.loads(response.text)
         
         final_response = []
@@ -302,6 +320,11 @@ def get_image_recommendation_real():
 
     except Exception as e:
         logger.exception("Error in /recommend-image")
+        if local_mapper:
+            try:
+                local_mapper.face_mesh.close()
+            except:
+                pass
         return jsonify({"error": str(e)}), 500
 
 
@@ -325,9 +348,11 @@ def get_routine_recommendation_real():
             return jsonify({"error": "No image file provided"}), 400
         
         file = request.files['image']
-        img_bytes = file.read()
-        img_pil = PIL.Image.open(io.BytesIO(img_bytes))
-
+        
+        # Optimization: Resize for routine generation too
+        image = PIL.Image.open(file)
+        image.thumbnail((1024, 1024))
+        
         survey_data_str = request.form.get('data')
         if not survey_data_str:
             return jsonify({"error": "No survey data provided"}), 400
@@ -348,7 +373,7 @@ def get_routine_recommendation_real():
         """
 
         logger.info("Sending request to Gemini...")
-        response = routine_model.generate_content([user_prompt, img_pil])
+        response = routine_model.generate_content([user_prompt, image])
         routine_results = json.loads(response.text)
         
         return jsonify(routine_results), 200
