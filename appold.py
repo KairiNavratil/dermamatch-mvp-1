@@ -12,11 +12,8 @@ import pandas as pd
 import random
 from face_mapper import FaceMapper
 
-# --- CONFIGURATION ---
-# SET THIS TO FALSE when you want to use the real AI!
-TEST_MODE = True 
-
 # --- LOGGING SETUP ---
+# This ensures logs print to the Render console immediately
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -28,87 +25,28 @@ load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 app = Flask(__name__)
+# Enable CORS for all domains
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 mapper = FaceMapper()
 
-# --- MOCK DATA FOR TESTING ---
-MOCK_ANALYSIS_RESPONSE = {
-    "analysis": [
-        {
-            "x": 45.5, 
-            "y": 40.2, 
-            "title": "[TEST] Forehead Texture", 
-            "description": "Simulated roughness detected in test mode.", 
-            "anchor_used": "mock_id_1"
-        },
-        {
-            "x": 60.1, 
-            "y": 65.8, 
-            "title": "[TEST] Chin Redness", 
-            "description": "Simulated inflammation detected in test mode.", 
-            "anchor_used": "mock_id_2"
-        }
-    ],
-    "all_landmarks": [] # Empty for test mode, or populate if frontend needs it
-}
-
-MOCK_ROUTINE_RESPONSE = {
-    "routine": [
-        {
-            "step": "Cleanser",
-            "product_name": "[TEST] Gentle Foaming Wash",
-            "brand": "TestBrand",
-            "price": 12.99,
-            "store": "TestStore",
-            "image_url": "https://via.placeholder.com/150",
-            "benefits": [{"title": "Gentle", "description": "Good for testing."}]
-        },
-        {
-            "step": "Treatment",
-            "product_name": "[TEST] Salicylic Acid Serum",
-            "brand": "The Test Ordinary",
-            "price": 8.50,
-            "store": "Sephora",
-            "image_url": "https://via.placeholder.com/150",
-            "benefits": [{"title": "Exfoliating", "description": "Clears mock acne."}]
-        },
-        {
-            "step": "Moisturizer",
-            "product_name": "[TEST] Hydra-Gel",
-            "brand": "Neutro-Test",
-            "price": 18.00,
-            "store": "Target",
-            "image_url": "https://via.placeholder.com/150",
-            "benefits": [{"title": "Hydrating", "description": "Water-based hydration."}]
-        },
-        {
-            "step": "SPF",
-            "product_name": "[TEST] Invisible Sunscreen",
-            "brand": "Super-Test",
-            "price": 30.00,
-            "store": "Ulta",
-            "image_url": "https://via.placeholder.com/150",
-            "benefits": [{"title": "Protection", "description": "SPF 50 mock protection."}]
-        }
-    ]
-}
-
 # --- REQUEST HOOKS ---
 @app.before_request
 def log_request_info():
+    """Log incoming request details immediately."""
     logger.info(f"👉 INCOMING: {request.method} {request.path}")
 
 @app.after_request
 def log_response_info(response):
+    """Log response status after processing."""
     logger.info(f"✅ COMPLETED: {request.path} - Status: {response.status_code}")
     return response
 
 # --- HEALTH CHECK ROUTE ---
 @app.route('/', methods=['GET'])
 def health_check():
-    status = "TEST MODE ACTIVE" if TEST_MODE else "online"
-    return jsonify({"status": status, "message": "DermaMatch API is running"}), 200
+    """Simple route to check if server is awake."""
+    return jsonify({"status": "online", "message": "DermaMatch API is running"}), 200
 
 # --- DATABASE LOADING ---
 product_db = pd.DataFrame()
@@ -116,6 +54,7 @@ try:
     if os.path.exists("cleaned_products.csv"):
         logger.info("Loading product database...")
         product_db = pd.read_csv("cleaned_products.csv")
+        
         # Normalize columns
         cols_to_str = ['name', 'brand', 'ingredients_str', 'type']
         for col in cols_to_str:
@@ -134,9 +73,6 @@ try:
         else:
             product_db['store'] = ''
 
-        for col in cols_to_str:
-            if col in product_db.columns:
-                product_db[col] = product_db[col].fillna('').astype(str)
         product_db['type'] = product_db['type'].str.upper().str.strip()
         logger.info(f"✅ Loaded Product DB: {len(product_db)} items.")
     else:
@@ -152,8 +88,9 @@ def get_product_candidates(product_type, limit=50):
     sample = candidates.sample(sample_size)
     return sample[['name', 'brand', 'ingredients_str', 'imageUrl', 'price', 'store']].to_dict(orient='records')
 
-# --- PROMPTS (Keep these for when you switch TEST_MODE off) ---
-ANALYSIS_PROMPT = """You are a 'Derma-AI' specialist. 
+# --- 1. VISUAL ANALYSIS PROMPT ---
+ANALYSIS_PROMPT = """
+You are a 'Derma-AI' specialist. 
 Your goal is to analyze a selfie for skin features and map them to the PRECISELY matching point from the provided mesh.
 
 INPUT DATA:
@@ -182,6 +119,8 @@ OUTPUT FORMAT:
   }
 ]
 """
+
+# --- 2. ROUTINE GENERATION PROMPT ---
 ROUTINE_PROMPT = """
 You are an elite Cosmetic Chemist AI. Your goal is to curate a highly personalized routine.
 
@@ -212,32 +151,23 @@ OUTPUT FORMAT (JSON):
 """
 
 # --- INITIALIZE MODELS ---
-# Only initialize if NOT in test mode to save startup time/errors if key is missing
-if not TEST_MODE:
-    visual_model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash-preview-09-2025", 
-        system_instruction=ANALYSIS_PROMPT,
-        generation_config={"response_mime_type": "application/json"}
-    )
-    routine_model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash-preview-09-2025", 
-        system_instruction=ROUTINE_PROMPT,
-        generation_config={"response_mime_type": "application/json"}
-    )
-else:
-    logger.info("⚠️ TEST MODE ON: Gemini Models NOT initialized.")
+visual_model = genai.GenerativeModel(
+    model_name="gemini-2.5-flash-preview-09-2025", 
+    system_instruction=ANALYSIS_PROMPT,
+    generation_config={"response_mime_type": "application/json"}
+)
+
+routine_model = genai.GenerativeModel(
+    model_name="gemini-2.5-flash-preview-09-2025", 
+    system_instruction=ROUTINE_PROMPT,
+    generation_config={"response_mime_type": "application/json"}
+)
 
 @app.route('/recommend-image', methods=['POST'])
 def get_image_recommendation():
-    """Endpoint 1: Visual Analysis"""
+    """Endpoint 1: Visual Analysis (Points of Interest)"""
     try:
         logger.info("--- Starting /recommend-image ---")
-        
-        if TEST_MODE:
-            logger.info("⚡ TEST MODE: Returning mock visual analysis.")
-            return jsonify(MOCK_ANALYSIS_RESPONSE), 200
-        # ------------------------
-
         if 'image' not in request.files:
             logger.error("No image file provided")
             return jsonify({"error": "No image file provided"}), 400
@@ -319,13 +249,6 @@ def get_routine_recommendation():
     """Endpoint 2: Database-Backed Routine Generation with Estimation"""
     try:
         logger.info("--- Starting /recommend-routine ---")
-
-        # --- TEST MODE BYPASS ---
-        if TEST_MODE:
-            logger.info("⚡ TEST MODE: Returning mock routine.")
-            return jsonify(MOCK_ROUTINE_RESPONSE), 200
-        # ------------------------
-
         if 'image' not in request.files:
             return jsonify({"error": "No image file provided"}), 400
         
