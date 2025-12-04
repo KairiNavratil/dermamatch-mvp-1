@@ -12,10 +12,6 @@ import pandas as pd
 import random
 from face_mapper import FaceMapper
 
-# --- CONFIGURATION ---
-# SET THIS TO FALSE when you want to use the real AI!
-TEST_MODE = True 
-
 # --- LOGGING SETUP ---
 logging.basicConfig(
     level=logging.INFO,
@@ -25,32 +21,42 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 load_dotenv()
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+# Configure Gemini (Only fails if you try to use the Real endpoints without a key)
+api_key = os.getenv("GEMINI_API_KEY")
+if api_key:
+    genai.configure(api_key=api_key)
+else:
+    logger.warning("⚠️ GEMINI_API_KEY not found. Real AI endpoints will fail.")
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 mapper = FaceMapper()
 
-# --- MOCK DATA FOR TESTING ---
+# --- MOCK DATA FOR TEST ENDPOINTS ---
 MOCK_ANALYSIS_RESPONSE = {
     "analysis": [
         {
             "x": 45.5, 
             "y": 40.2, 
             "title": "[TEST] Forehead Texture", 
-            "description": "Simulated roughness detected in test mode.", 
+            "description": "Simulated roughness detected (Test Mode).", 
             "anchor_used": "mock_id_1"
         },
         {
             "x": 60.1, 
             "y": 65.8, 
             "title": "[TEST] Chin Redness", 
-            "description": "Simulated inflammation detected in test mode.", 
+            "description": "Simulated inflammation detected (Test Mode).", 
             "anchor_used": "mock_id_2"
         }
     ],
-    "all_landmarks": [] # Empty for test mode, or populate if frontend needs it
+    # Added dummy landmarks so "Debug Mesh" works in frontend during testing
+    "all_landmarks": [
+        {"code": "mock_id_1", "x": 45.5, "y": 40.2, "region": "Forehead"},
+        {"code": "mock_id_2", "x": 60.1, "y": 65.8, "region": "Chin"}
+    ]
 }
 
 MOCK_ROUTINE_RESPONSE = {
@@ -94,29 +100,13 @@ MOCK_ROUTINE_RESPONSE = {
     ]
 }
 
-# --- REQUEST HOOKS ---
-@app.before_request
-def log_request_info():
-    logger.info(f"👉 INCOMING: {request.method} {request.path}")
-
-@app.after_request
-def log_response_info(response):
-    logger.info(f"✅ COMPLETED: {request.path} - Status: {response.status_code}")
-    return response
-
-# --- HEALTH CHECK ROUTE ---
-@app.route('/', methods=['GET'])
-def health_check():
-    status = "TEST MODE ACTIVE" if TEST_MODE else "online"
-    return jsonify({"status": status, "message": "DermaMatch API is running"}), 200
-
 # --- DATABASE LOADING ---
 product_db = pd.DataFrame()
 try:
     if os.path.exists("cleaned_products.csv"):
         logger.info("Loading product database...")
         product_db = pd.read_csv("cleaned_products.csv")
-        # Normalize columns
+        
         cols_to_str = ['name', 'brand', 'ingredients_str', 'type']
         for col in cols_to_str:
             if col in product_db.columns:
@@ -126,17 +116,10 @@ try:
 
         if 'price' in product_db.columns:
             product_db['price'] = product_db['price'].fillna(0)
-        else:
-            product_db['price'] = 0
-
+        
         if 'store' in product_db.columns:
             product_db['store'] = product_db['store'].fillna('')
-        else:
-            product_db['store'] = ''
 
-        for col in cols_to_str:
-            if col in product_db.columns:
-                product_db[col] = product_db[col].fillna('').astype(str)
         product_db['type'] = product_db['type'].str.upper().str.strip()
         logger.info(f"✅ Loaded Product DB: {len(product_db)} items.")
     else:
@@ -152,8 +135,9 @@ def get_product_candidates(product_type, limit=50):
     sample = candidates.sample(sample_size)
     return sample[['name', 'brand', 'ingredients_str', 'imageUrl', 'price', 'store']].to_dict(orient='records')
 
-# --- PROMPTS (Keep these for when you switch TEST_MODE off) ---
-ANALYSIS_PROMPT = """You are a 'Derma-AI' specialist. 
+# --- PROMPTS ---
+ANALYSIS_PROMPT = """
+You are a 'Derma-AI' specialist. 
 Your goal is to analyze a selfie for skin features and map them to the PRECISELY matching point from the provided mesh.
 
 INPUT DATA:
@@ -182,6 +166,7 @@ OUTPUT FORMAT:
   }
 ]
 """
+
 ROUTINE_PROMPT = """
 You are an elite Cosmetic Chemist AI. Your goal is to curate a highly personalized routine.
 
@@ -212,34 +197,45 @@ OUTPUT FORMAT (JSON):
 """
 
 # --- INITIALIZE MODELS ---
-# Only initialize if NOT in test mode to save startup time/errors if key is missing
-if not TEST_MODE:
+try:
     visual_model = genai.GenerativeModel(
         model_name="gemini-2.5-flash-preview-09-2025", 
         system_instruction=ANALYSIS_PROMPT,
         generation_config={"response_mime_type": "application/json"}
     )
+
     routine_model = genai.GenerativeModel(
         model_name="gemini-2.5-flash-preview-09-2025", 
         system_instruction=ROUTINE_PROMPT,
         generation_config={"response_mime_type": "application/json"}
     )
-else:
-    logger.info("⚠️ TEST MODE ON: Gemini Models NOT initialized.")
+except Exception as e:
+    logger.error(f"Error initializing Gemini models: {e}")
+
+# --- HEALTH CHECK ---
+@app.route('/', methods=['GET'])
+def health_check():
+    return jsonify({
+        "status": "online", 
+        "endpoints": [
+            "/recommend-image (REAL)",
+            "/recommend-image-test (MOCK)",
+            "/recommend-routine (REAL)",
+            "/recommend-routine-test (MOCK)"
+        ]
+    }), 200
+
+
+# ==========================================
+#  ENDPOINT 1: VISUAL ANALYSIS
+# ==========================================
 
 @app.route('/recommend-image', methods=['POST'])
-def get_image_recommendation():
-    """Endpoint 1: Visual Analysis"""
+def get_image_recommendation_real():
+    """REAL: Uses MediaPipe + Gemini (Costs Tokens)"""
     try:
-        logger.info("--- Starting /recommend-image ---")
-        
-        if TEST_MODE:
-            logger.info("⚡ TEST MODE: Returning mock visual analysis.")
-            return jsonify(MOCK_ANALYSIS_RESPONSE), 200
-        # ------------------------
-
+        logger.info("--- Starting /recommend-image (REAL) ---")
         if 'image' not in request.files:
-            logger.error("No image file provided")
             return jsonify({"error": "No image file provided"}), 400
         
         file = request.files['image']
@@ -248,10 +244,8 @@ def get_image_recommendation():
         logger.info("Running MediaPipe...")
         face_data = mapper.get_face_landmarks(img_bytes)
         if not face_data:
-            logger.warning("No face detected by MediaPipe")
             return jsonify({"error": "No face detected in image."}), 400
 
-        # PREPARE FULL 468-POINT LIST FOR AI & DEBUG
         ai_landmark_context = []
         all_landmarks_debug = []
         
@@ -284,8 +278,6 @@ def get_image_recommendation():
 
         logger.info("Sending request to Gemini...")
         response = visual_model.generate_content([user_prompt, img_pil])
-        logger.info("Gemini response received.")
-        
         ai_results = json.loads(response.text)
         
         final_response = []
@@ -303,7 +295,6 @@ def get_image_recommendation():
                     "anchor_used": code
                 })
         
-        logger.info(f"Returning {len(final_response)} visual features.")
         return jsonify({
             "analysis": final_response,
             "all_landmarks": all_landmarks_debug
@@ -314,18 +305,22 @@ def get_image_recommendation():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/recommend-image-test', methods=['POST'])
+def get_image_recommendation_test():
+    """TEST: Returns static mock data (No Cost)"""
+    logger.info("--- Starting /recommend-image-test (MOCK) ---")
+    return jsonify(MOCK_ANALYSIS_RESPONSE), 200
+
+
+# ==========================================
+#  ENDPOINT 2: ROUTINE GENERATION
+# ==========================================
+
 @app.route('/recommend-routine', methods=['POST'])
-def get_routine_recommendation():
-    """Endpoint 2: Database-Backed Routine Generation with Estimation"""
+def get_routine_recommendation_real():
+    """REAL: Uses Gemini to generate routine (Costs Tokens)"""
     try:
-        logger.info("--- Starting /recommend-routine ---")
-
-        # --- TEST MODE BYPASS ---
-        if TEST_MODE:
-            logger.info("⚡ TEST MODE: Returning mock routine.")
-            return jsonify(MOCK_ROUTINE_RESPONSE), 200
-        # ------------------------
-
+        logger.info("--- Starting /recommend-routine (REAL) ---")
         if 'image' not in request.files:
             return jsonify({"error": "No image file provided"}), 400
         
@@ -356,12 +351,19 @@ def get_routine_recommendation():
         response = routine_model.generate_content([user_prompt, img_pil])
         routine_results = json.loads(response.text)
         
-        logger.info("Routine generated successfully.")
         return jsonify(routine_results), 200
 
     except Exception as e:
         logger.exception("Error in /recommend-routine")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/recommend-routine-test', methods=['POST'])
+def get_routine_recommendation_test():
+    """TEST: Returns static mock data (No Cost)"""
+    logger.info("--- Starting /recommend-routine-test (MOCK) ---")
+    return jsonify(MOCK_ROUTINE_RESPONSE), 200
+
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
