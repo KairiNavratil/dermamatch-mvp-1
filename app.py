@@ -292,6 +292,17 @@ def get_image_recommendation_real():
             ai_string = f"ID: {code} | Region: {data['region']} | Location: X={x_pct:.1f}%, Y={y_pct:.1f}%"
             ai_landmark_context.append(ai_string)
 
+        user_prompt = f"""
+        Analyze this image. 
+        Here is the MAP of the face with exact coordinates:
+        {json.dumps(ai_landmark_context)}
+        
+        INSTRUCTION: 
+        1. Find a blemish visually.
+        2. Estimate its X/Y coordinates on the image.
+        3. Find the ID in the list above that has the CLOSEST coordinates.
+        """
+
         logger.info("Sending request to Gemini...")
         response = visual_model.generate_content([user_prompt, image]) # Pass PIL image directly
         logger.info("Gemini response received.")
