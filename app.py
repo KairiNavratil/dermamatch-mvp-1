@@ -11,7 +11,9 @@ import json
 import pandas as pd
 import random
 import gc 
+import time
 from face_mapper import FaceMapper
+from google.api_core import exceptions
 
 # --- LOGGING SETUP ---
 logging.basicConfig(
@@ -63,78 +65,116 @@ MOCK_ANALYSIS_RESPONSE = {
 MOCK_ROUTINE_RESPONSE = {
     "routine": [
         {
-            "step": "Cleanser",
-            "product_name": "[TEST] Gentle Foaming Wash",
+            "imageUrl": "https://via.placeholder.com/150",
+            "name": "[TEST] Gentle Foaming Wash",
             "brand": "TestBrand",
             "price": 12.99,
             "store": "TestStore",
-            "image_url": "https://via.placeholder.com/150",
-            "benefits": [{"title": "Gentle", "description": "Good for testing."}]
+            "type": "CLEANSER",
+            "benefits": [{"title": "Why this?", "description": "Gentle foam removes oil without stripping."}]
         },
         {
-            "step": "Treatment",
-            "product_name": "[TEST] Salicylic Acid Serum",
+            "imageUrl": "https://via.placeholder.com/150",
+            "name": "[TEST] Balancing Toner",
+            "brand": "TestBrand",
+            "price": 14.50,
+            "store": "Ulta",
+            "type": "TONER",
+            "benefits": [{"title": "Why this?", "description": "Restores pH balance after cleansing."}]
+        },
+        {
+            "imageUrl": "https://via.placeholder.com/150",
+            "name": "[TEST] Salicylic Acid Serum",
             "brand": "The Test Ordinary",
             "price": 8.50,
             "store": "Sephora",
-            "image_url": "https://via.placeholder.com/150",
-            "benefits": [{"title": "Exfoliating", "description": "Clears mock acne."}]
+            "type": "SERUM",
+            "benefits": [{"title": "Why this?", "description": "Targets the acne detected on the chin."}]
         },
         {
-            "step": "Moisturizer",
-            "product_name": "[TEST] Hydra-Gel",
+            "imageUrl": "https://via.placeholder.com/150",
+            "name": "[TEST] Hydra-Gel",
             "brand": "Neutro-Test",
             "price": 18.00,
             "store": "Target",
-            "image_url": "https://via.placeholder.com/150",
-            "benefits": [{"title": "Hydrating", "description": "Water-based hydration."}]
+            "type": "MOISTURIZER",
+            "benefits": [{"title": "Why this?", "description": "Lightweight hydration for oily skin."}]
         },
         {
-            "step": "SPF",
-            "product_name": "[TEST] Invisible Sunscreen",
+            "imageUrl": "https://via.placeholder.com/150",
+            "name": "[TEST] Invisible Sunscreen",
             "brand": "Super-Test",
             "price": 30.00,
             "store": "Ulta",
-            "image_url": "https://via.placeholder.com/150",
-            "benefits": [{"title": "Protection", "description": "SPF 50 mock protection."}]
+            "type": "SUNSCREEN",
+            "benefits": [{"title": "Why this?", "description": "Protects sensitive skin without whitecast."}]
         }
     ]
 }
 
 # --- DATABASE LOADING ---
 product_db = pd.DataFrame()
+INVENTORY_CONTEXT = "" # Global string to hold the entire catalog
+
 try:
     if os.path.exists("cleaned_products.csv"):
         logger.info("Loading product database...")
-        product_db = pd.read_csv("cleaned_products.csv")
+        df_raw = pd.read_csv("cleaned_products.csv")
         
+        # 1. Normalize Columns
         cols_to_str = ['name', 'brand', 'ingredients_str', 'type']
         for col in cols_to_str:
-            if col in product_db.columns:
-                product_db[col] = product_db[col].fillna('').astype(str)
+            if col in df_raw.columns:
+                df_raw[col] = df_raw[col].fillna('').astype(str)
             else:
-                product_db[col] = '' 
+                df_raw[col] = '' 
 
-        if 'price' in product_db.columns:
-            product_db['price'] = product_db['price'].fillna(0)
+        if 'price' in df_raw.columns:
+            df_raw['price'] = df_raw['price'].fillna(0)
         
-        if 'store' in product_db.columns:
-            product_db['store'] = product_db['store'].fillna('')
+        if 'store' in df_raw.columns:
+            df_raw['store'] = df_raw['store'].fillna('')
+        
+        # Ensure imageUrl is clean string
+        if 'imageUrl' not in df_raw.columns:
+             df_raw['imageUrl'] = ''
+        
+        # Force string, fill NA, and STRIP WHITESPACE
+        df_raw['imageUrl'] = df_raw['imageUrl'].fillna('').astype(str).str.strip()
+        df_raw['type'] = df_raw['type'].str.upper().str.strip()
 
-        product_db['type'] = product_db['type'].str.upper().str.strip()
-        logger.info(f"✅ Loaded Product DB: {len(product_db)} items.")
+        # 2. FILTER: Only keep the core 5 steps.
+        target_types = ['CLEANSER', 'TONER', 'SERUM', 'MOISTURIZER', 'SUNSCREEN']
+        
+        valid_mask = (df_raw['type'].isin(target_types))
+        df_clean = df_raw[valid_mask].copy()
+        
+        # Fallback if filtering fails
+        if len(df_clean) < 50:
+            logger.warning("⚠️ Warning: Filtering removed almost all products! Falling back to full DB.")
+            product_db = df_raw
+        else:
+            logger.info(f"✅ Filtered to {len(df_clean)} products (Core Categories Only).")
+            product_db = df_clean
+
+        # 3. GENERATE COMPRESSED CONTEXT (ID|Type|Brand|Name)
+        # We assume the dataframe index is the stable ID
+        product_db['context_str'] = (
+            "[" + product_db.index.astype(str) + "]" + 
+            product_db['type'] + "|" + 
+            product_db['brand'] + "|" + 
+            product_db['name']
+        )
+        
+        INVENTORY_CONTEXT = "\n".join(product_db['context_str'].tolist())
+        
+        logger.info(f"✅ Inventory Context Ready ({len(INVENTORY_CONTEXT)} chars)")
+        
     else:
         logger.warning("⚠️ WARNING: cleaned_products.csv not found.")
 except Exception as e:
     logger.error(f"❌ Error loading DB: {e}")
 
-def get_product_candidates(product_type, limit=50):
-    if product_db.empty: return []
-    candidates = product_db[product_db['type'] == product_type.upper()]
-    if candidates.empty: return []
-    sample_size = min(len(candidates), limit)
-    sample = candidates.sample(sample_size)
-    return sample[['name', 'brand', 'ingredients_str', 'imageUrl', 'price', 'store']].to_dict(orient='records')
 
 # --- PROMPTS ---
 ANALYSIS_PROMPT = """
@@ -168,37 +208,31 @@ OUTPUT FORMAT:
 ]
 """
 
+# UPDATED: Re-enabled "Reasoning" but kept it SHORT.
 ROUTINE_PROMPT = """
-You are an elite Cosmetic Chemist AI. Your goal is to curate a highly personalized routine.
+You are an elite Cosmetic Chemist AI. Curate a routine by SELECTING items from the inventory.
 
-INPUT DATA:
+INPUT:
 1. User Image (Visual context).
-2. Survey Answers (Habits, Sensitivity).
-3. **Product Candidates**: List of available products.
+2. Survey Answers.
+3. **INVENTORY CATALOG:** `[ID]TYPE|BRAND|NAME`
 
-YOUR TASK:
-1. **Analyze the User:** Combine visual needs + survey data.
-2. **Select Products:** For each step (Cleanser, Treatment, Moisturizer, SPF), pick the BEST match based on ingredients.
-3. **ESTIMATE MISSING DATA:** If 'price' is 0 or 'store' is empty, ESTIMATE them based on the brand's typical market positioning.
+TASK:
+1. Analyze user needs.
+2. Scan CATALOG. Pick the BEST product ID for: Cleanser, Toner, Serum, Moisturizer, Sunscreen.
+3. **Personalize:** For each item, write a VERY SHORT (1 sentence) reason why it fits this **skin profile** (avoid addressing the user directly as 'you').
 
 OUTPUT FORMAT (JSON):
 {
   "routine": [
-    {
-      "step": "Cleanser",
-      "product_name": "Name",
-      "brand": "Brand",
-      "price": "Number",
-      "store": "String",
-      "image_url": "URL",
-      "benefits": [ { "title": "Benefit", "description": "..." } ]
-    }
+    { "step": "Cleanser", "inventory_id": 123, "short_reason": "Contains salicylic acid to target chin acne." },
+    { "step": "Toner", "inventory_id": 456, "short_reason": "Calms redness often seen on sensitive cheeks." },
+    ...
   ]
 }
 """
 
 # --- INITIALIZE MODELS ---
-# We keep Gemini global as it's just an API client (low memory)
 try:
     visual_model = genai.GenerativeModel(
         model_name="gemini-2.5-flash-preview-09-2025", 
@@ -213,6 +247,21 @@ try:
     )
 except Exception as e:
     logger.error(f"Error initializing Gemini models: {e}")
+
+# --- HELPER: RETRY LOGIC ---
+def generate_with_retry(model, inputs, retries=3):
+    """Retries generation if 429 (Resource Exhausted) occurs."""
+    for attempt in range(retries):
+        try:
+            return model.generate_content(inputs)
+        except exceptions.ResourceExhausted:
+            wait_time = (2 ** attempt) + 1  # Exponential backoff: 2s, 3s, 5s...
+            logger.warning(f"⚠️ Quota exceeded (429). Retrying in {wait_time}s...")
+            time.sleep(wait_time)
+        except Exception as e:
+            # For other errors, raise immediately
+            raise e
+    raise Exception("Max retries exceeded for AI generation.")
 
 # --- HEALTH CHECK ---
 @app.route('/', methods=['GET'])
@@ -244,33 +293,29 @@ def get_image_recommendation_real():
         file = request.files['image']
         
         # --- MEMORY OPTIMIZATION STEP ---
-        # 1. Open image with PIL (efficient)
         image = PIL.Image.open(file)
         
-        # 2. Resize if too large (MediaPipe crashes on 4k images in low RAM envs)
         max_size = 1024
         if image.width > max_size or image.height > max_size:
             logger.info(f"Resizing image from {image.size} to max {max_size}px...")
             image.thumbnail((max_size, max_size))
             
-        # 3. Convert back to bytes for MediaPipe/Gemini
         img_byte_arr = io.BytesIO()
         image.save(img_byte_arr, format=image.format or 'JPEG')
         img_bytes = img_byte_arr.getvalue()
         
         # --- LAZY LOADING MEDIAPIPE ---
-        # Initialize ONLY when needed, then destroy immediately
         logger.info("Initializing FaceMapper locally...")
         local_mapper = FaceMapper()
         
         logger.info("Running MediaPipe...")
         face_data = local_mapper.get_face_landmarks(img_bytes)
         
-        # Force cleanup of MediaPipe C++ resources
+        # Force cleanup
         local_mapper.face_mesh.close()
         del local_mapper
         local_mapper = None
-        gc.collect() # Force garbage collection
+        gc.collect() 
         
         if not face_data:
             return jsonify({"error": "No face detected in image."}), 400
@@ -304,7 +349,8 @@ def get_image_recommendation_real():
         """
 
         logger.info("Sending request to Gemini...")
-        response = visual_model.generate_content([user_prompt, image]) # Pass PIL image directly
+        # Use retry logic here too
+        response = generate_with_retry(visual_model, [user_prompt, image])
         logger.info("Gemini response received.")
         
         ai_results = json.loads(response.text)
@@ -352,15 +398,13 @@ def get_image_recommendation_test():
 
 @app.route('/recommend-routine', methods=['POST'])
 def get_routine_recommendation_real():
-    """REAL: Uses Gemini to generate routine (Costs Tokens)"""
+    """REAL: Uses Gemini with FULL DATABASE CONTEXT"""
     try:
         logger.info("--- Starting /recommend-routine (REAL) ---")
         if 'image' not in request.files:
             return jsonify({"error": "No image file provided"}), 400
         
         file = request.files['image']
-        
-        # Optimization: Resize for routine generation too
         image = PIL.Image.open(file)
         image.thumbnail((1024, 1024))
         
@@ -369,25 +413,58 @@ def get_routine_recommendation_real():
             return jsonify({"error": "No survey data provided"}), 400
         survey_data = json.loads(survey_data_str)
 
-        logger.info("Fetching candidates...")
-        candidates = {
-            "Cleanser": get_product_candidates("CLEANSER", 50),
-            "Treatment": get_product_candidates("SERUM", 50), 
-            "Moisturizer": get_product_candidates("MOISTURIZER", 50),
-            "SPF": get_product_candidates("SUNSCREEN", 50)
-        }
-
+        # 1. CONSTRUCT PROMPT WITH COMPRESSED INVENTORY
         user_prompt = f"""
-        Generate a skincare routine.
-        SURVEY: {json.dumps(survey_data, indent=2)}
-        CANDIDATES: {json.dumps(candidates, indent=2)}
+        Generate a skincare routine for this user.
+        
+        USER SURVEY: {json.dumps(survey_data, indent=2)}
+        
+        === INVENTORY CATALOG START ===
+        {INVENTORY_CONTEXT}
+        === INVENTORY CATALOG END ===
+        
+        INSTRUCTIONS:
+        - Pick exactly one product for: Cleanser, Toner, Serum, Moisturizer, Sunscreen.
+        - You MUST pick by ID from the list above.
         """
 
-        logger.info("Sending request to Gemini...")
-        response = routine_model.generate_content([user_prompt, image])
-        routine_results = json.loads(response.text)
+        logger.info("Asking Gemini to select from Inventory...")
         
-        return jsonify(routine_results), 200
+        # Use retry logic for robustness
+        response = generate_with_retry(routine_model, [user_prompt, image])
+        ai_selection = json.loads(response.text)
+        
+        # 2. CONVERT IDs TO FULL PRODUCT DETAILS
+        final_routine = []
+        
+        for step in ai_selection.get("routine", []):
+            inv_id = step.get('inventory_id')
+            
+            # Lookup in DB
+            if inv_id is not None and inv_id in product_db.index:
+                row = product_db.loc[inv_id]
+                logger.info(f"✅ Selected ID {inv_id}: {row['name']}")
+                
+                # Retrieve URL and clean it
+                url_val = row.get('imageUrl', '').strip()
+                
+                # AI Generated Benefit
+                ai_reason = step.get('short_reason', 'Selected based on your skin analysis.')
+
+                # Construct Response
+                final_routine.append({
+                    "imageUrl": url_val,
+                    "name": row['name'],
+                    "price": row.get('price', 0),
+                    "store": row.get('store', ''),
+                    "type": row['type'], 
+                    "brand": row['brand'],
+                    "benefits": [{"title": "Why this?", "description": ai_reason}] 
+                })
+            else:
+                logger.warning(f"⚠️ AI returned invalid ID: {inv_id}")
+
+        return jsonify({"routine": final_routine}), 200
 
     except Exception as e:
         logger.exception("Error in /recommend-routine")
